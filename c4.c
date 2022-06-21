@@ -15,30 +15,30 @@
 #define intll long long
 
 char *p, *lp, // current position in source code
-     *data;   // data/bss pointer
+     *g_data;   // data/bss pointer
 
-intll *e, *le,  // current position in emitted code
-    *id,      // currently parsed identifier
-    *sym,     // symbol table (simple list of identifiers)
-    g_token,       // current token
-    ival,     // current token value
-    ty,       // current expression type
-    loc,      // local variable offset
-    line,     // current line number
-    src,      // print source and assembly flag
-    debug;    // print executed instructions
+intll *g_text, *le,  // current position in emitted code
+      *g_cur_sym,      // currently parsed identifier
+      *g_symtab,     // symbol table (simple list of identifiers)
+      g_cur_token,       // current token
+      g_token_val,     // current token value
+      g_token_type,       // current expression type
+      loc,      // local variable offset
+      line,     // current line number
+      src,      // print source and assembly flag
+      debug;    // print executed instructions
 
 // tokens and classes (operators last and in precedence order)
 enum {
-  Num = 128, Fun, Sys, Glo, Loc, Id,
-  Char, Else, Enum, If, Int, Return, Sizeof, While,
-  Assign, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr, Add, Sub, Mul, Div, Mod, Inc, Dec, Brak
+    Num = 128, Fun, Sys, Glo, Loc, Id,
+    Char, Else, Enum, If, Int, Return, Sizeof, While,
+    Assign, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr, Add, Sub, Mul, Div, Mod, Inc, Dec, Brak
 };
 
 // opcodes
 enum { LEA ,IMM ,JMP ,JSR ,BZ  ,BNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PSH ,
-       OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,
-       OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT };
+    OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,
+    OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT };
 
 // types
 enum { CHAR, INT, PTR };
@@ -46,545 +46,728 @@ enum { CHAR, INT, PTR };
 // identifier offsets (since we can't create an ident struct)
 enum { Tk, Hash, Name, Class, Type, Val, HClass, HType, HVal, Idsz };
 
-void parseNextToken()
-{
-  char *pp;
+// parse char, gen current token
+void parseToken(){
+    char *pp;
 
-  while ((g_token = *p)) {
-    ++p;
-    if (g_token == '\n') {
-      if (src) {
-        printf("%lld: %.*s", line, p - lp, lp);
-        lp = p;
-        while (le < e) {
-          printf("%8.4s", &"LEA ,IMM ,JMP ,JSR ,BZ  ,BNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PSH ,"
-                           "OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,"
-                           "OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT,"[*++le * 5]);
-          if (*le <= ADJ) printf(" %lld\n", *++le); else printf("\n");
-        }
-      }
-      ++line;
-    }
-    else if (g_token == '#') {
-      while (*p != 0 && *p != '\n') ++p;
-    }
-    else if ((g_token >= 'a' && g_token <= 'z') || (g_token >= 'A' && g_token <= 'Z') || g_token == '_') {
-      pp = p - 1;
-      while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_')
-        g_token = g_token * 147 + *p++;
-      g_token = (g_token << 6) + (p - pp);
-      id = sym;
-      while (id[Tk]) {
-        if (g_token == id[Hash] && !memcmp((char *)id[Name], pp, p - pp)) { g_token = id[Tk]; return; }
-        id = id + Idsz;
-      }
-      id[Name] = (intll)pp;
-      id[Hash] = g_token;
-      g_token = id[Tk] = Id;
-      return;
-    }
-    else if (g_token >= '0' && g_token <= '9') {
-      if ((ival = g_token - '0')) {
-          while (*p >= '0' && *p <= '9') ival = ival * 10 + *p++ - '0';
-      }
-      else if (*p == 'x' || *p == 'X') {
-        while ((g_token = *++p) && ((g_token >= '0' && g_token <= '9') || (g_token >= 'a' && g_token <= 'f') || (g_token >= 'A' && g_token <= 'F')))
-          ival = ival * 16 + (g_token & 15) + (g_token >= 'A' ? 9 : 0);
-      }
-      else { while (*p >= '0' && *p <= '7') ival = ival * 8 + *p++ - '0'; }
-      g_token = Num;
-      return;
-    }
-    else if (g_token == '/') {
-      if (*p == '/') {
+    while (g_cur_token = *p) {
         ++p;
-        while (*p != 0 && *p != '\n') ++p;
-      }
-      else {
-        g_token = Div;
-        return;
-      }
-    }
-    else if (g_token == '\'' || g_token == '"') {
-      pp = data;
-      while (*p != 0 && *p != g_token) {
-        if ((ival = *p++) == '\\') {
-          if ((ival = *p++) == 'n') ival = '\n';
-        }
-        if (g_token == '"') *data++ = ival;
-      }
-      ++p;
-      if (g_token == '"') ival = (intll)pp; else g_token = Num;
-      return;
-    }
-    else if (g_token == '=') { if (*p == '=') { ++p; g_token = Eq; } else g_token = Assign; return; }
-    else if (g_token == '+') { if (*p == '+') { ++p; g_token = Inc; } else g_token = Add; return; }
-    else if (g_token == '-') { if (*p == '-') { ++p; g_token = Dec; } else g_token = Sub; return; }
-    else if (g_token == '!') { if (*p == '=') { ++p; g_token = Ne; } return; }
-    else if (g_token == '<') { if (*p == '=') { ++p; g_token = Le; } else if (*p == '<') { ++p; g_token = Shl; } else g_token = Lt; return; }
-    else if (g_token == '>') { if (*p == '=') { ++p; g_token = Ge; } else if (*p == '>') { ++p; g_token = Shr; } else g_token = Gt; return; }
-    else if (g_token == '|') { if (*p == '|') { ++p; g_token = Lor; } else g_token = Or; return; }
-    else if (g_token == '&') { if (*p == '&') { ++p; g_token = Lan; } else g_token = And; return; }
-    else if (g_token == '^') { g_token = Xor; return; }
-    else if (g_token == '%') { g_token = Mod; return; }
-    else if (g_token == '*') { g_token = Mul; return; }
-    else if (g_token == '[') { g_token = Brak; return; }
-    else if (g_token == '?') { g_token = Cond; return; }
-    else if (g_token == '~' || g_token == ';' || g_token == '{' || g_token == '}' || g_token == '(' || g_token == ')' || g_token == ']' || g_token == ',' || g_token == ':') return;
-  }
-}
+        if (g_cur_token == '\n') {    // 换行符
+            if (src) {
+                printf("%lld: %.*s", line, (int)(p - lp), lp);
+                lp = p;
+                while (le < g_text) {
+                    printf("%8.4s", &"LEA ,IMM ,JMP ,JSR ,BZ  ,BNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PSH ,"
+                            "OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,"
+                            "OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT,"[*++le * 5]);
 
-void expr(intll lev)
-{
-  intll t, *d;
-  switch (g_token) {
-      case 0: { printf("%lld: unexpected eof in expression\n", line); exit(-1); }
-      case Num: { *++e = IMM; *++e = ival; parseNextToken(); ty = INT; break; }
-      case '"': { *++e = IMM; *++e = ival; parseNextToken();
-                    while (g_token == '"') parseNextToken();
-                    data = (char *)((intll)data + sizeof(intll) & -sizeof(intll)); ty = PTR;
-                    break;
+                    if (*le <= ADJ) printf(" %lld\n", *++le);
+                    else printf("\n");
                 }
-      case Sizeof: {
-                     parseNextToken();
-                     if (g_token == '(') parseNextToken();
-                     else { printf("%lld: open paren expected in sizeof\n", line); exit(-1); }
-                     ty = INT;
-                     if (g_token == Int) parseNextToken();
-                     else if (g_token == Char) { parseNextToken(); ty = CHAR; }
+            }
+            ++line; //设置行数
+        } else if ((g_cur_token >= 'a' && g_cur_token <= 'z') || (g_cur_token >= 'A' && g_cur_token <= 'Z') || g_cur_token == '_') {
+            pp = p - 1;    // 标识符首字符指针
 
-                     while (g_token == Mul) { parseNextToken(); ty = ty + PTR; }
+            //
+            while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_') {
+                g_cur_token = g_cur_token * 147 + *p;
+                ++p;
+            }
+            g_cur_token = (g_cur_token << 6) + (p - pp);
 
-                     if (g_token == ')') parseNextToken();
-                     else { printf("%lld: close paren expected in sizeof\n", line); exit(-1); }
-
-                     *++e = IMM; *++e = (ty == CHAR) ? sizeof(char) : sizeof(intll);
-                     ty = INT;
-                     break;
-                 }
-    case Id: {
-                 d = id;
-                 parseNextToken();
-                 if (g_token == '(') {
-                     parseNextToken();
-                     t = 0;
-                     while (g_token != ')') {
-                         expr(Assign);
-                         *++e = PSH; ++t;
-                         if (g_token == ',') parseNextToken();
-                     }
-                     parseNextToken();
-                     if (d[Class] == Sys) *++e = d[Val];
-                     else if (d[Class] == Fun) { *++e = JSR; *++e = d[Val]; }
-                     else { printf("%lld: bad function call\n", line); exit(-1); }
-                     if (t) { *++e = ADJ; *++e = t; }
-                     ty = d[Type];
-                 }
-                 else if (d[Class] == Num) { *++e = IMM; *++e = d[Val]; ty = INT; }
-                 else {
-                     if (d[Class] == Loc) { *++e = LEA; *++e = loc - d[Val]; }
-                     else if (d[Class] == Glo) { *++e = IMM; *++e = d[Val]; }
-                     else { printf("%lld: undefined variable\n", line); exit(-1); }
-                     *++e = ((ty = d[Type]) == CHAR) ? LC : LI;
-                 }
-                 break;
-             }
-    case '(': {
-                  parseNextToken();
-                  if (g_token == Int || g_token == Char) {
-                      t = (g_token == Int) ? INT : CHAR; parseNextToken();
-                      while (g_token == Mul) { parseNextToken(); t = t + PTR; }
-                      if (g_token == ')') parseNextToken();
-                      else { printf("%lld: bad cast\n", line); exit(-1); }
-                      expr(Inc);
-                      ty = t;
-                  }
-                  else {
-                      expr(Assign);
-                      if (g_token == ')') parseNextToken();
-                      else { printf("%lld: close paren expected\n", line); exit(-1); }
-                  }
-                  break;
-              }
-    case Mul: {
-                  parseNextToken(); expr(Inc);
-                  if (ty > INT) ty = ty - PTR;
-                  else { printf("%lld: bad dereference\n", line); exit(-1); }
-                  *++e = (ty == CHAR) ? LC : LI;
-                  break;
-              }
-    case And: {
-                  parseNextToken(); expr(Inc);
-                  if (*e == LC || *e == LI) --e;
-                  else { printf("%lld: bad address-of\n", line); exit(-1); }
-                  ty = ty + PTR;
-                  break;
-              }
-    case '!': { parseNextToken(); expr(Inc); *++e = PSH; *++e = IMM; *++e = 0; *++e = EQ; ty = INT; break; }
-    case '~': { parseNextToken(); expr(Inc); *++e = PSH; *++e = IMM; *++e = -1; *++e = XOR; ty = INT; break; }
-    case Add: { parseNextToken(); expr(Inc); ty = INT; break; }
-    case Sub: {
-                  parseNextToken(); *++e = IMM;
-                  if (g_token == Num) { *++e = -ival; parseNextToken(); }
-                  else { *++e = -1; *++e = PSH; expr(Inc); *++e = MUL; }
-                  ty = INT;
-                  break;
-              }
-    case Inc:
-    case Dec: {
-                  t = g_token; parseNextToken(); expr(Inc);
-                  switch (*e) {
-                      case LC: { *e = PSH; *++e = LC; break; }
-                      case LI: { *e = PSH; *++e = LI; break; }
-                      default: { printf("%lld: bad lvalue in pre-increment\n", line); exit(-1); }
-                  }
-                  *++e = PSH;
-                  *++e = IMM;
-                  *++e = (ty > PTR) ? sizeof(intll) : sizeof(char);
-                  *++e = (t == Inc) ? ADD : SUB;
-                  *++e = (ty == CHAR) ? SC : SI;
-                  break;
-              }
-    default: { printf("%lld: bad expression\n", line); exit(-1); }
+            //
+            g_cur_sym = g_symtab;
+            while (g_cur_sym[Tk]) {
+                if (g_cur_token == g_cur_sym[Hash] && !memcmp((char *)g_cur_sym[Name], pp, p - pp)) {
+                    g_cur_token = g_cur_sym[Tk];
+                    return;
+                }
+                g_cur_sym = g_cur_sym + Idsz;
+            }
+            g_cur_sym[Name] = (intll)pp;
+            g_cur_sym[Hash] = g_cur_token;
+            g_cur_token = g_cur_sym[Tk] = Id;
+            return;
+        } else if (g_cur_token >= '0' && g_cur_token <= '9') {
+            if ((g_token_val = g_cur_token - '0')) {
+                while (*p >= '0' && *p <= '9') {
+                    g_token_val = g_token_val * 10 + *p++ - '0';
+                }
+            }
+            else if (*p == 'x' || *p == 'X') {
+                while ((g_cur_token = *++p) && ((g_cur_token >= '0' && g_cur_token <= '9') || (g_cur_token >= 'a' && g_cur_token <= 'f') || (g_cur_token >= 'A' && g_cur_token <= 'F'))) {
+                    g_token_val = g_token_val * 16 + (g_cur_token & 15) + (g_cur_token >= 'A' ? 9 : 0);
+                }
+            }
+            else {
+                while (*p >= '0' && *p <= '7') {
+                    g_token_val = g_token_val * 8 + *p++ - '0';
+                }
+            }
+            g_cur_token = Num;
+            return;
+        } else {
+            switch (g_cur_token) {
+                case '#': {  while (*p != 0 && *p != '\n') { ++p; } break; }
+                case '/': {
+                              if (*p == '/') {              // 注释
+                                  ++p;
+                                  while (*p != 0 && *p != '\n') ++p;
+                              } else {                        //除号
+                                  g_cur_token = Div;
+                                  return;
+                              }
+                              break;
+                          }
+                case '\'':
+                case '"': {
+                              pp = g_data;
+                              while (*p != 0 && *p != g_cur_token) {
+                                  if ((g_token_val = *p++) == '\\') {
+                                      if ((g_token_val = *p++) == 'n') {
+                                          g_token_val = '\n';
+                                      }
+                                  }
+                                  if (g_cur_token == '"') {
+                                    *g_data++ = g_token_val;
+                                  }
+                              }
+                              ++p;
+                              if (g_cur_token == '"') {
+                                  g_token_val = (intll)pp;
+                              } else {
+                                  g_cur_token = Num;
+                              }
+                              return;
+                          }
+                case '=': { if (*p == '=') { ++p; g_cur_token = Eq; } else { g_cur_token = Assign; } return; }
+                case '+': { if (*p == '+') { ++p; g_cur_token = Inc; } else { g_cur_token = Add; } return; }
+                case '-': { if (*p == '-') { ++p; g_cur_token = Dec; } else g_cur_token = Sub; return; }
+                case '!': { if (*p == '=') { ++p; g_cur_token = Ne; } return; }
+                case '<': { if (*p == '=') { ++p; g_cur_token = Le; } else if (*p == '<') { ++p; g_cur_token = Shl; } else g_cur_token = Lt; return; }
+                case '>': { if (*p == '=') { ++p; g_cur_token = Ge; } else if (*p == '>') { ++p; g_cur_token = Shr; } else g_cur_token = Gt; return; }
+                case '|': { if (*p == '|') { ++p; g_cur_token = Lor; } else g_cur_token = Or; return; }
+                case '&': { if (*p == '&') { ++p; g_cur_token = Lan; } else g_cur_token = And; return; }
+                case '^': { g_cur_token = Xor; return; }
+                case '%': { g_cur_token = Mod; return; }
+                case '*': { g_cur_token = Mul; return; }
+                case '[': { g_cur_token = Brak; return; }
+                case '?': { g_cur_token = Cond; return; }
+                case '~':
+                case ';':
+                case '{':
+                case '}':
+                case '(':
+                case ')':
+                case ']':
+                case ',':
+                case ':': { return ; }
+                default: { break; }
+            }
+        }
+    }
 }
 
-  while (g_token >= lev) { // "precedence climbing" or "Top Down Operator Precedence" method
-    t = ty;
-    switch (g_token) {
-        case Assign: {
-                         parseNextToken();
-                         if (*e == LC || *e == LI) *e = PSH;
-                         else { printf("%lld: bad lvalue in assignment\n", line); exit(-1); }
-                         expr(Assign); *++e = ((ty = t) == CHAR) ? SC : SI;
+// try to parse token
+void tryParseToken(intll tk) {
+    if (g_cur_token != tk) {
+        printf("%lld: open paren expected\n", line);
+        exit(-1);
+    }
+    parseToken();
+}
+
+// 表达式, 根据g_token, 设置e
+void expr(intll lev) {
+    intll t, *d;
+    switch (g_cur_token) {
+        case 0: { printf("%lld: unexpected eof in expression\n", line); exit(-1); }
+        case Num: {
+                      *++g_text = IMM;
+                      *++g_text = g_token_val;
+                      parseToken();
+                      g_token_type = INT;
+                      break;
+                  }
+        case '"': {
+                      *++g_text = IMM;
+                      *++g_text = g_token_val;
+                      parseToken();
+                      while (g_cur_token == '"') {
+                          parseToken();
+                      }
+                      g_data = (char *)((intll)g_data + sizeof(intll) & -sizeof(intll));
+                      g_token_type = PTR;
+                      break;
+                  }
+        case Sizeof: {
+                         parseToken();
+                         tryParseToken('(');
+                         g_token_type = INT;
+                         switch (g_cur_token) {
+                             case Int: { parseToken(); break; }
+                             case Char: { parseToken(); g_token_type = CHAR; break; }
+                             default: { break; }
+                         }
+                         while (g_cur_token == Mul) {
+                             parseToken();
+                             g_token_type += PTR;
+                         }
+                         tryParseToken(')');
+
+                         *++g_text = IMM;
+                         *++g_text = (g_token_type == CHAR) ? sizeof(char) : sizeof(intll);
+                         g_token_type = INT;
                          break;
                      }
-        case Cond: {
-                       parseNextToken();
-                       *++e = BZ; d = ++e;
-                       expr(Assign);
-                       if (g_token == ':') parseNextToken();
-                       else { printf("%lld: conditional missing colon\n", line); exit(-1); }
-                       *d = (int)(e + 3); *++e = JMP; d = ++e;
-                       expr(Cond);
-                       *d = (int)(e + 1);
-                       break;
-                   }
-        case Lor: { parseNextToken(); *++e = BNZ; d = ++e; expr(Lan); *d = (intll)(e + 1); ty = INT;break; }
-        case Lan: { parseNextToken(); *++e = BZ;  d = ++e; expr(Or);  *d = (intll)(e + 1); ty = INT;break; }
-        case Or:  { parseNextToken(); *++e = PSH; expr(Xor); *++e = OR;  ty = INT;break; }
-        case Xor: { parseNextToken(); *++e = PSH; expr(And); *++e = XOR; ty = INT;break; }
-        case And: { parseNextToken(); *++e = PSH; expr(Eq);  *++e = AND; ty = INT;break; }
-        case Eq:  { parseNextToken(); *++e = PSH; expr(Lt);  *++e = EQ;  ty = INT;break; }
-        case Ne:  { parseNextToken(); *++e = PSH; expr(Lt);  *++e = NE;  ty = INT;break; }
-        case Lt:  { parseNextToken(); *++e = PSH; expr(Shl); *++e = LT;  ty = INT;break; }
-        case Gt:  { parseNextToken(); *++e = PSH; expr(Shl); *++e = GT;  ty = INT;break; }
-        case Le:  { parseNextToken(); *++e = PSH; expr(Shl); *++e = LE;  ty = INT;break; }
-        case Ge:  { parseNextToken(); *++e = PSH; expr(Shl); *++e = GE;  ty = INT;break; }
-        case Shl: { parseNextToken(); *++e = PSH; expr(Add); *++e = SHL; ty = INT;break; }
-        case Shr: { parseNextToken(); *++e = PSH; expr(Add); *++e = SHR; ty = INT;break; }
-        case Add: { parseNextToken(); *++e = PSH; expr(Mul);
-                      if ((ty = t) > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(intll); *++e = MUL;  }
-                      *++e = ADD;
+        case Id: {   // 变量和函数
+                     d = g_cur_sym;
+                     parseToken();
+                     if (g_cur_token == '(') {
+                         parseToken();
+                         t = 0;
+                         while (g_cur_token != ')') {
+                             expr(Assign);
+                             *++g_text = PSH;
+                             ++t;
+                             if (g_cur_token == ',') {
+                                 parseToken();
+                             }
+                         }
+                         parseToken();
+
+                         switch (d[Class]) {
+                             case Sys: { *++g_text = d[Val]; break; }
+                             case Fun: { *++g_text = JSR; *++g_text = d[Val]; break; }
+                             default: { printf("%lld: bad function call\n", line); exit(-1); }
+                         }
+
+                         if (t>0) {
+                             *++g_text = ADJ;
+                             *++g_text = t;
+                         }
+                         g_token_type = d[Type];
+                     } else if (d[Class] == Num) {
+                         *++g_text = IMM;
+                         *++g_text = d[Val];
+                         g_token_type = INT;
+                     } else {
+                         switch (d[Class] ) {
+                             case Loc: { *++g_text = LEA; *++g_text = loc - d[Val]; break; }
+                             case Glo: { *++g_text = IMM; *++g_text = d[Val]; break; }
+                             default: { printf("%lld: undefined variable\n", line); exit(-1);  }
+                         }
+                         *++g_text = ((g_token_type = d[Type]) == CHAR) ? LC : LI;
+                     }
+                     break;
+                 }
+        case '(': {
+                      parseToken();
+                      if (g_cur_token == Int || g_cur_token == Char) {
+                          t = (g_cur_token == Int) ? INT : CHAR;
+                          parseToken();
+                          while (g_cur_token == Mul) {
+                              parseToken();
+                              t += PTR;
+                          }
+
+                          tryParseToken(')');
+
+                          expr(Inc);
+                          g_token_type = t;
+                      } else {
+                          expr(Assign);
+                          tryParseToken(')');
+                      }
                       break;
                   }
-        case Sub: { parseNextToken(); *++e = PSH; expr(Mul);
-                      if (t > PTR && t == ty) { *++e = SUB; *++e = PSH; *++e = IMM; *++e = sizeof(intll); *++e = DIV; ty = INT; }
-                      else if ((ty = t) > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(intll); *++e = MUL; *++e = SUB; }
-                      else *++e = SUB;
+        case Mul: {
+                      parseToken();
+                      expr(Inc);
+                      if (g_token_type > INT) {
+                          g_token_type = g_token_type - PTR;
+                      } else {
+                          printf("%lld: bad dereference\n", line); exit(-1);
+                      }
+                      *++g_text = (g_token_type == CHAR) ? LC : LI;
                       break;
                   }
-        case Mul: { parseNextToken(); *++e = PSH; expr(Inc); *++e = MUL; ty = INT; break; }
-        case Div: { parseNextToken(); *++e = PSH; expr(Inc); *++e = DIV; ty = INT; break; }
-        case Mod: { parseNextToken(); *++e = PSH; expr(Inc); *++e = MOD; ty = INT; break; }
+        case And: {
+                      parseToken();
+                      expr(Inc);
+                      if (*g_text == LC || *g_text == LI) --g_text;
+                      else { printf("%lld: bad address-of\n", line); exit(-1); }
+                      g_token_type = g_token_type + PTR;
+                      break;
+                  }
+        case '!': { parseToken(); expr(Inc); *++g_text = PSH; *++g_text = IMM; *++g_text = 0; *++g_text = EQ; g_token_type = INT; break; }
+        case '~': { parseToken(); expr(Inc); *++g_text = PSH; *++g_text = IMM; *++g_text = -1; *++g_text = XOR; g_token_type = INT; break; }
+        case Add: { parseToken(); expr(Inc); g_token_type = INT; break; }
+        case Sub: {
+                      parseToken();
+                      *++g_text = IMM;
+                      if (g_cur_token == Num) {
+                          *++g_text = -g_token_val;
+                          parseToken();
+                      } else {
+                          *++g_text = -1;
+                          *++g_text = PSH;
+                          expr(Inc);
+                          *++g_text = MUL;
+                      }
+                      g_token_type = INT;
+                      break;
+                  }
         case Inc:
         case Dec: {
-                      if (*e == LC) { *e = PSH; *++e = LC; }
-                      else if (*e == LI) { *e = PSH; *++e = LI; }
-                      else { printf("%lld: bad lvalue in post-increment\n", line); exit(-1); }
-                      *++e = PSH; *++e = IMM; *++e = (ty > PTR) ? sizeof(intll) : sizeof(char);
-                      *++e = (g_token == Inc) ? ADD : SUB;
-                      *++e = (ty == CHAR) ? SC : SI;
-                      *++e = PSH; *++e = IMM; *++e = (ty > PTR) ? sizeof(intll) : sizeof(char);
-                      *++e = (g_token == Inc) ? SUB : ADD;
-                      parseNextToken();
+                      t = g_cur_token;
+                      parseToken();
+                      expr(Inc);
+                      switch (*g_text) {
+                          case LC: { *g_text = PSH; *++g_text = LC; break; }
+                          case LI: { *g_text = PSH; *++g_text = LI; break; }
+                          default: { printf("%lld: bad lvalue in pre-increment\n", line); exit(-1); }
+                      }
+                      *++g_text = PSH;
+                      *++g_text = IMM;
+                      *++g_text = (g_token_type > PTR) ? sizeof(intll) : sizeof(char);
+                      *++g_text = (t == Inc) ? ADD : SUB;
+                      *++g_text = (g_token_type == CHAR) ? SC : SI;
                       break;
                   }
-        case Brak: { parseNextToken(); *++e = PSH; expr(Assign);
-                       if (g_token == ']') parseNextToken();
-                       else { printf("%lld: close bracket expected\n", line); exit(-1); }
-                       if (t > PTR) { *++e = PSH; *++e = IMM; *++e = sizeof(intll); *++e = MUL;  }
-                       else if (t < PTR) { printf("%lld: pointer type expected\n", line); exit(-1); }
-                       *++e = ADD;
-                       *++e = ((ty = t - PTR) == CHAR) ? LC : LI;
-                       break;
-                   }
-        default: { printf("%lld: compiler error tk=%lld\n", line, g_token); exit(-1); }
+        default: {
+                     printf("%lld: bad expression\n", line);
+                     exit(-1);
+                 }
     }
-  }
+
+    // "precedence climbing" or "Top Down Operator Precedence" method
+    while (g_cur_token >= lev) {
+        t = g_token_type;
+        switch (g_cur_token) {
+            case Assign: {
+                             parseToken();
+                             if (*g_text == LC || *g_text == LI) *g_text = PSH;
+                             else { printf("%lld: bad lvalue in assignment\n", line); exit(-1); }
+
+                             expr(Assign);
+                             *++g_text = ((g_token_type = t) == CHAR) ? SC : SI;
+                             break;
+                         }
+            case Cond: { parseToken();
+                           *++g_text = BZ; d = ++g_text;
+                           expr(Assign);
+                           tryParseToken(':');
+                           *d = (intll)(g_text + 3);
+                           *++g_text = JMP;
+                           d = ++g_text;
+                           expr(Cond);
+                           *d = (intll)(g_text + 1);
+                           break;
+                       }
+            case Lor: { parseToken(); *++g_text = BNZ; d = ++g_text; expr(Lan); *d = (intll)(g_text + 1); g_token_type = INT;break; }
+            case Lan: { parseToken(); *++g_text = BZ;  d = ++g_text; expr(Or);  *d = (intll)(g_text + 1); g_token_type = INT;break; }
+            case Or:  { parseToken(); *++g_text = PSH; expr(Xor); *++g_text = OR;  g_token_type = INT;break; }
+            case Xor: { parseToken(); *++g_text = PSH; expr(And); *++g_text = XOR; g_token_type = INT;break; }
+            case And: { parseToken(); *++g_text = PSH; expr(Eq);  *++g_text = AND; g_token_type = INT;break; }
+            case Eq:  { parseToken(); *++g_text = PSH; expr(Lt);  *++g_text = EQ;  g_token_type = INT;break; }
+            case Ne:  { parseToken(); *++g_text = PSH; expr(Lt);  *++g_text = NE;  g_token_type = INT;break; }
+            case Lt:  { parseToken(); *++g_text = PSH; expr(Shl); *++g_text = LT;  g_token_type = INT;break; }
+            case Gt:  { parseToken(); *++g_text = PSH; expr(Shl); *++g_text = GT;  g_token_type = INT;break; }
+            case Le:  { parseToken(); *++g_text = PSH; expr(Shl); *++g_text = LE;  g_token_type = INT;break; }
+            case Ge:  { parseToken(); *++g_text = PSH; expr(Shl); *++g_text = GE;  g_token_type = INT;break; }
+            case Shl: { parseToken(); *++g_text = PSH; expr(Add); *++g_text = SHL; g_token_type = INT;break; }
+            case Shr: { parseToken(); *++g_text = PSH; expr(Add); *++g_text = SHR; g_token_type = INT;break; }
+            case Add: { parseToken(); *++g_text = PSH; expr(Mul);
+                          if ((g_token_type = t) > PTR) {
+                              *++g_text = PSH;
+                              *++g_text = IMM;
+                              *++g_text = sizeof(intll);
+                              *++g_text = MUL;
+                          }
+                          *++g_text = ADD;
+                          break;
+                      }
+            case Sub: {
+                          parseToken(); ;*++g_text = PSH; expr(Mul);
+                          if (t > PTR && t == g_token_type) {
+                              *++g_text = SUB;
+                              *++g_text = PSH;
+                              *++g_text = IMM;
+                              *++g_text = sizeof(intll);
+                              *++g_text = DIV;
+                              g_token_type = INT;
+                          } else if ((g_token_type = t) > PTR) {
+                              *++g_text = PSH;
+                              *++g_text = IMM;
+                              *++g_text = sizeof(intll);
+                              *++g_text = MUL;
+                              *++g_text = SUB; }
+                          else {
+                              *++g_text = SUB;
+                          }
+                          break;
+                      }
+            case Mul: { parseToken(); *++g_text = PSH; expr(Inc); *++g_text = MUL; g_token_type = INT; break; }
+            case Div: { parseToken(); *++g_text = PSH; expr(Inc); *++g_text = DIV; g_token_type = INT; break; }
+            case Mod: { parseToken(); *++g_text = PSH; expr(Inc); *++g_text = MOD; g_token_type = INT; break; }
+            case Inc:
+            case Dec: {
+                          switch (*g_text) {
+                              case LC: { *g_text = PSH; *++g_text = LC; }
+                              case LI: { *g_text = PSH; *++g_text = LI; }
+                              default: { printf("%lld: bad lvalue in post-increment\n", line); exit(-1); }
+                          }
+
+                          *++g_text = PSH;
+                          *++g_text = IMM;
+                          *++g_text = (g_token_type > PTR) ? sizeof(intll) : sizeof(char);
+                          *++g_text = (g_cur_token == Inc) ? ADD : SUB;
+                          *++g_text = (g_token_type == CHAR) ? SC : SI;
+                          *++g_text = PSH; *++g_text = IMM;
+                          *++g_text = (g_token_type > PTR) ? sizeof(intll) : sizeof(char);
+                          *++g_text = (g_cur_token == Inc) ? SUB : ADD;
+                          parseToken();
+                          break;
+                      }
+            case Brak: {
+                           parseToken();
+                           *++g_text = PSH;
+                           expr(Assign);
+                           tryParseToken(']');
+
+                           if (t > PTR) {
+                               *++g_text = PSH;
+                               *++g_text = IMM;
+                               *++g_text = sizeof(intll);
+                               *++g_text = MUL;
+                           } else if (t < PTR) {
+                               printf("%lld: pointer type expected\n", line);
+                               exit(-1);
+                           }
+                           *++g_text = ADD;
+                           *++g_text = ((g_token_type = t - PTR) == CHAR) ? LC : LI;
+                           break;
+                       }
+            default: {
+                         printf("%lld: compiler error tk=%lld\n", line, g_cur_token);
+                         exit(-1);
+                     }
+        }
+    }
 }
 
-// 语句
-void stmt()
-{
-  intll *a, *b;
-  switch (g_token) {
-      case If: {
-                   parseNextToken();
-                   if (g_token == '(') parseNextToken();
-                   else { printf("%lld: open paren expected\n", line); exit(-1); }
-                   expr(Assign);
+/*
+ * 语句
+ * 可识别一下语句:
+ *   if ( <expr> ) <statement> [else <statement>]
+     while ( <expr> ) <statement>
+            { <statement> }
+     return xxx;
+     { [stmt] }
+     <empty statement>;
+     expression; (expression end with semicolon)
+ * */
+void stmt() {
+    intll *a, *b;
+    switch (g_cur_token) {
+        case If: {
+                     parseToken();
 
-                   if (g_token == ')') parseNextToken();
-                   else { printf("%lld: close paren expected\n", line); exit(-1); }
+                     tryParseToken('(');
+                     expr(Assign);
+                     tryParseToken(')');
 
-                   *++e = BZ; b = ++e;
-                   stmt();
-                   if (g_token == Else) {
-                       *b = (intll)(e + 3); *++e = JMP; b = ++e;
-                       parseNextToken();
-                       stmt();
-                   }
-                   *b = (intll)(e + 1);
-                   break;
-               }
-      case While: { parseNextToken();
-                      a = e + 1;
-                      if (g_token == '(') parseNextToken();
-                      else { printf("%lld: open paren expected\n", line); exit(-1); }
-                      expr(Assign);
-                      if (g_token == ')') parseNextToken();
-                      else { printf("%lld: close paren expected\n", line); exit(-1); }
-                      *++e = BZ; b = ++e;
-                      stmt();
-                      *++e = JMP; *++e = (intll)a;
-                      *b = (intll)(e + 1);
+                     *++g_text = BZ;
+                     b = ++g_text;
+
+                     stmt();
+
+                     if (g_cur_token == Else) {
+                         *b = (intll)(g_text + 3);
+                         *++g_text = JMP;
+                         b = ++g_text;
+
+                         parseToken();
+                         stmt();
+                     }
+                     *b = (intll)(g_text + 1);
+                     break;
+                 }
+        case While: {
+                        parseToken();
+
+                        a = g_text + 1;   //address a
+
+                        tryParseToken('(');
+                        expr(Assign);
+                        tryParseToken(')');
+
+                        *++g_text = BZ;
+                        b = ++g_text;
+                        stmt();
+                        *++g_text = JMP;
+                        *++g_text = (intll)a;
+                        *b = (intll)(g_text + 1);   //address b
+                        break;
+                    }
+        case Return: {
+                         parseToken();
+                         if (g_cur_token != ';') {
+                             expr(Assign);
+                         }
+                         *++g_text = LEV;
+                         tryParseToken(';');
+                         break;
+                     }
+        case '{': {
+                      parseToken();
+                      while (g_cur_token != '}') {
+                          stmt();
+                      }
+                      parseToken();
                       break;
                   }
-      case Return: { parseNextToken();
-                       if (g_token != ';') expr(Assign);
-                       *++e = LEV;
-                       if (g_token == ';') parseNextToken();
-                       else { printf("%lld: semicolon expected\n", line); exit(-1); }
-                       break;
-                   }
-      case '{': { parseNextToken();
-                    while (g_token != '}') stmt();
-                    parseNextToken();
-                    break;
-                }
-      case ';': { parseNextToken(); break; }
-      default: {
-                   expr(Assign);
-                   if (g_token == ';') parseNextToken();
-                   else { printf("%lld: semicolon expected\n", line); exit(-1); }
-                   break;
-               }
-  }
+        case ';': { parseToken(); break; }
+        default: {
+                     expr(Assign);
+                     tryParseToken(';');
+                     break;
+                 }
+    }
 }
 
 //
 int main(int argc, char** argv){
-  intll fd, bt, ty, poolsz, *idmain;
-  intll *pc, *sp, *bp, a, cycle; // vm registers
-  intll i, *t; // temps
+    intll fd,           // source fd
+          bt,           //
+          ty,           // token
+          poolsz,       //
+          *idmain;
+    intll *pc,  // program counter pointer
+          *sp,  // stack pointer
+          *bp,  // stack base pointer
+          a,    //
+          cycle; // vm registers
 
-  --argc; ++argv;
-  if (argc > 0 && **argv == '-' && (*argv)[1] == 's') { src = 1; --argc; ++argv; }
-  if (argc > 0 && **argv == '-' && (*argv)[1] == 'd') { debug = 1; --argc; ++argv; }
-  if (argc < 1) { printf("usage: c4 [-s] [-d] file ...\n"); return -1; }
+    intll i, *t; // temps
 
-  if ((fd = open(*argv, 0)) < 0) { printf("could not open(%s)\n", *argv); return -1; }
+    --argc; ++argv;
+    if (argc > 0 && **argv == '-' && (*argv)[1] == 's') { src = 1; --argc; ++argv; }
+    if (argc > 0 && **argv == '-' && (*argv)[1] == 'd') { debug = 1; --argc; ++argv; }
+    if (argc < 1) { printf("usage: c4 [-s] [-d] file ...\n"); return -1; }
 
-  poolsz = 256*1024; // arbitrary size
-  if (!(sym = malloc(poolsz))) { printf("could not malloc(%lld) symbol area\n", poolsz); return -1; }
-  if (!(le = e = malloc(poolsz))) { printf("could not malloc(%lld) text area\n", poolsz); return -1; }
-  if (!(data = malloc(poolsz))) { printf("could not malloc(%lld) data area\n", poolsz); return -1; }
-  if (!(sp = malloc(poolsz))) { printf("could not malloc(%lld) stack area\n", poolsz); return -1; }
+    if ((fd = open(*argv, 0)) < 0) { printf("could not open(%s)\n", *argv); return -1; }
 
-  memset(sym,  0, poolsz);
-  memset(e,    0, poolsz);
-  memset(data, 0, poolsz);
+    poolsz = 256*1024; // arbitrary size
+    if (!(g_symtab = malloc(poolsz))) { printf("could not malloc(%lld) symbol area\n", poolsz); return -1; }
+    if (!(le = g_text = malloc(poolsz))) { printf("could not malloc(%lld) text area\n", poolsz); return -1; }
+    if (!(g_data = malloc(poolsz))) { printf("could not malloc(%lld) data area\n", poolsz); return -1; }
+    if (!(sp = malloc(poolsz))) { printf("could not malloc(%lld) stack area\n", poolsz); return -1; }
 
-  p = "char else enum if int return sizeof while "
-      "open read close printf malloc free memset memcmp exit void main";
-  i = Char; while (i <= While) { parseNextToken(); id[Tk] = i++; } // add keywords to symbol table
-  i = OPEN; while (i <= EXIT) { parseNextToken(); id[Class] = Sys; id[Type] = INT; id[Val] = i++; } // add library to symbol table
-  parseNextToken(); id[Tk] = Char; // handle void type
-  parseNextToken(); idmain = id; // keep track of main
+    memset(g_symtab,  0, poolsz);
+    memset(g_text,    0, poolsz);
+    memset(g_data, 0, poolsz);
 
-  if (!(lp = p = malloc(poolsz))) { 
-      printf("could not malloc(%lld) source area\n", poolsz); 
-      return -1; 
-  }
-  if ((i = read(fd, p, poolsz-1)) <= 0) { printf("read() returned %lld\n", i); return -1; }
-  p[i] = 0;
-  close(fd);
+    p = "char else enum if int return sizeof while "
+        "open read close printf malloc free memset memcmp exit void main";
+    i = Char;
+    while (i <= While) {   // add keywords to symbol table
+        parseToken();
+        g_cur_sym[Tk] = i++;
+    }
 
-  // parse declarations
-  line = 1;
-  parseNextToken();
-  while (g_token) {
-    bt = INT; // basetype
-              //
-    switch (g_token) {
-        case Int: parseNextToken(); break;
-        case Char: { parseNextToken(); bt = CHAR; break; }
-        case Enum: { parseNextToken();
-                       if (g_token != '{') parseNextToken();
-                       if (g_token == '{') {
-                           parseNextToken();
-                           i = 0;
-                           while (g_token != '}') {
-                               if (g_token != Id) {
-                                   printf("%lld: bad enum identifier %lld\n", line, g_token);
-                                   return -1;
+    i = OPEN;
+    while (i <= EXIT) {  // add library to symbol table
+        parseToken();
+        g_cur_sym[Class] = Sys;
+        g_cur_sym[Type] = INT;
+        g_cur_sym[Val] = i++;
+    }
+                                                                                                  //
+    parseToken();
+    g_cur_sym[Tk] = Char; // handle void type
+                          //
+    parseToken();
+    idmain = g_cur_sym; // keep track of main
+
+    if (!(lp = p = malloc(poolsz))) {
+        printf("could not malloc(%lld) source area\n", poolsz);
+        return -1;
+    }
+    if ((i = read(fd, p, poolsz-1)) <= 0) { printf("read() returned %lld\n", i); return -1; }
+    p[i] = 0;
+    close(fd);
+
+    // parse declarations
+    line = 1;
+    parseToken();
+    while (g_cur_token) {
+        bt = INT; // basetype
+        switch (g_cur_token) {
+            case Int: { parseToken(); bt = INT; break; }
+            case Char: { parseToken(); bt = CHAR; break; }
+            case Enum: { parseToken();
+                           if (g_cur_token != '{') parseToken();
+                           if (g_cur_token == '{') {
+                               parseToken();
+                               i = 0;
+                               while (g_cur_token != '}') {
+                                   if (g_cur_token != Id) {
+                                       printf("%lld: bad enum identifier %lld\n", line, g_cur_token);
+                                       return -1;
+                                   }
+                                   parseToken();
+                                   if (g_cur_token == Assign) {
+                                       parseToken();
+                                       if (g_cur_token != Num) { printf("%lld: bad enum initializer\n", line); return -1; }
+                                       i = g_token_val;
+                                       parseToken();
+                                   }
+                                   g_cur_sym[Class] = Num; g_cur_sym[Type] = INT; g_cur_sym[Val] = i++;
+                                   if (g_cur_token == ',') parseToken();
                                }
-                               parseNextToken();
-                               if (g_token == Assign) {
-                                   parseNextToken();
-                                   if (g_token != Num) { printf("%lld: bad enum initializer\n", line); return -1; }
-                                   i = ival;
-                                   parseNextToken();
-                               }
-                               id[Class] = Num; id[Type] = INT; id[Val] = i++;
-                               if (g_token == ',') parseNextToken();
+                               parseToken();
                            }
-                           parseNextToken();
+                           break;
                        }
-                       break;
-                   }
-        default: break;
-    }
-    while (g_token != ';' && g_token != '}') {
-      ty = bt;
-      while (g_token == Mul) { parseNextToken(); ty = ty + PTR; }
-      if (g_token != Id) { printf("%lld: bad global declaration\n", line); return -1; }
-      if (id[Class]) { printf("%lld: duplicate global definition\n", line); return -1; }
-      parseNextToken();
-      id[Type] = ty;
-      if (g_token == '(') { // function
-        id[Class] = Fun;
-        id[Val] = (intll)(e + 1);
-        parseNextToken(); i = 0;
-        while (g_token != ')') {
-          ty = INT;
-          if (g_token == Int) parseNextToken();
-          else if (g_token == Char) { parseNextToken(); ty = CHAR; }
-          while (g_token == Mul) { parseNextToken(); ty = ty + PTR; }
-          if (g_token != Id) { printf("%lld: bad parameter declaration\n", line); return -1; }
-          if (id[Class] == Loc) { printf("%lld: duplicate parameter definition\n", line); return -1; }
-          id[HClass] = id[Class]; id[Class] = Loc;
-          id[HType]  = id[Type];  id[Type] = ty;
-          id[HVal]   = id[Val];   id[Val] = i++;
-          parseNextToken();
-          if (g_token == ',') parseNextToken();
+            default: break;
         }
-        parseNextToken();
-        if (g_token != '{') { printf("%lld: bad function definition\n", line); return -1; }
-        loc = ++i;
-        parseNextToken();
-        while (g_token == Int || g_token == Char) {
-          bt = (g_token == Int) ? INT : CHAR;
-          parseNextToken();
-          while (g_token != ';') {
+
+        while (g_cur_token != ';' && g_cur_token != '}') {
             ty = bt;
-            while (g_token == Mul) { parseNextToken(); ty = ty + PTR; }
-            if (g_token != Id) { printf("%lld: bad local declaration\n", line); return -1; }
-            if (id[Class] == Loc) { printf("%lld: duplicate local definition\n", line); return -1; }
-            id[HClass] = id[Class]; id[Class] = Loc;
-            id[HType]  = id[Type];  id[Type] = ty;
-            id[HVal]   = id[Val];   id[Val] = ++i;
-            parseNextToken();
-            if (g_token == ',') parseNextToken();
-          }
-          parseNextToken();
+            while (g_cur_token == Mul) { parseToken(); ty = ty + PTR; }
+            if (g_cur_token != Id) { printf("%lld: bad global declaration\n", line); return -1; }
+            if (g_cur_sym[Class]) { printf("%lld: duplicate global definition\n", line); return -1; }
+            parseToken();
+            g_cur_sym[Type] = ty;
+            if (g_cur_token == '(') { // function
+                g_cur_sym[Class] = Fun;
+                g_cur_sym[Val] = (intll)(g_text + 1);
+                parseToken(); i = 0;
+                while (g_cur_token != ')') {
+                    ty = INT;
+                    if (g_cur_token == Int) parseToken();
+                    else if (g_cur_token == Char) { parseToken(); ty = CHAR; }
+
+                    while (g_cur_token == Mul) { parseToken(); ty = ty + PTR; }
+
+                    if (g_cur_token != Id) { printf("%lld: bad parameter declaration\n", line); return -1; }
+                    if (g_cur_sym[Class] == Loc) { printf("%lld: duplicate parameter definition\n", line); return -1; }
+                    g_cur_sym[HClass] = g_cur_sym[Class]; g_cur_sym[Class] = Loc;
+                    g_cur_sym[HType]  = g_cur_sym[Type];  g_cur_sym[Type] = ty;
+                    g_cur_sym[HVal]   = g_cur_sym[Val];   g_cur_sym[Val] = i++;
+                    parseToken();
+                    if (g_cur_token == ',') parseToken();
+                }
+                parseToken();
+                if (g_cur_token != '{') { printf("%lld: bad function definition\n", line); return -1; }
+                loc = ++i;
+                parseToken();
+                while (g_cur_token == Int || g_cur_token == Char) {
+                    bt = (g_cur_token == Int) ? INT : CHAR;
+                    parseToken();
+                    while (g_cur_token != ';') {
+                        ty = bt;
+                        while (g_cur_token == Mul) { parseToken(); ty = ty + PTR; }
+                        if (g_cur_token != Id) { printf("%lld: bad local declaration\n", line); return -1; }
+                        if (g_cur_sym[Class] == Loc) { printf("%lld: duplicate local definition\n", line); return -1; }
+                        g_cur_sym[HClass] = g_cur_sym[Class]; g_cur_sym[Class] = Loc;
+                        g_cur_sym[HType]  = g_cur_sym[Type];  g_cur_sym[Type] = ty;
+                        g_cur_sym[HVal]   = g_cur_sym[Val];   g_cur_sym[Val] = ++i;
+                        parseToken();
+                        if (g_cur_token == ',') parseToken();
+                    }
+                    parseToken();
+                }
+                *++g_text = ENT;
+                *++g_text = i - loc;
+                while (g_cur_token != '}') stmt();
+                *++g_text = LEV;
+                g_cur_sym = g_symtab; // unwind symbol table locals
+                while (g_cur_sym[Tk]) {
+                    if (g_cur_sym[Class] == Loc) {
+                        g_cur_sym[Class] = g_cur_sym[HClass];
+                        g_cur_sym[Type] = g_cur_sym[HType];
+                        g_cur_sym[Val] = g_cur_sym[HVal];
+                    }
+                    g_cur_sym = g_cur_sym + Idsz;
+                }
+            } else {
+                g_cur_sym[Class] = Glo;
+                g_cur_sym[Val] = (intll)g_data;
+                g_data = g_data + sizeof(int);
+            }
+            if (g_cur_token == ',') parseToken();
         }
-        *++e = ENT; *++e = i - loc;
-        while (g_token != '}') stmt();
-        *++e = LEV;
-        id = sym; // unwind symbol table locals
-        while (id[Tk]) {
-          if (id[Class] == Loc) {
-            id[Class] = id[HClass];
-            id[Type] = id[HType];
-            id[Val] = id[HVal];
-          }
-          id = id + Idsz;
+        parseToken();
+    }
+
+    if (!(pc = (intll *)idmain[Val])) { printf("main() not defined\n"); return -1; }
+    if (src) return 0;
+
+    // setup stack
+    bp = sp = (intll *)((intll)sp + poolsz);
+    *--sp = EXIT; // call exit if main returns
+    *--sp = PSH; t = sp;
+    *--sp = argc;
+    *--sp = (intll)argv;
+    *--sp = (intll)t;
+
+    // run...
+    cycle = 0;
+    while (1) {
+        i = *pc++;
+        ++cycle;
+        if (debug) {
+            printf("%lld> %.4s", cycle,
+                    &"LEA ,IMM ,JMP ,JSR ,BZ  ,BNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PSH ,"
+                    "OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,"
+                    "OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT,"[i * 5]);
+            if (i <= ADJ) printf(" %lld\n", *pc); else printf("\n");
         }
-      }
-      else {
-        id[Class] = Glo;
-        id[Val] = (intll)data;
-        data = data + sizeof(int);
-      }
-      if (g_token == ',') parseNextToken();
+        switch (i) {
+            case LEA: { a = (intll)(bp + *pc++); break; }                             // load local address
+            case IMM: { a = *pc++; break; }
+            case JMP: { pc = (intll *)*pc; break; }                                   // jump
+            case JSR: { *--sp = (intll)(pc + 1); pc = (intll *)*pc; break; }        // jump to subroutine
+            case BZ:  { pc = a ? pc + 1 : (intll *)*pc; break; }                     // branch if zero
+            case BNZ: { pc = !a ? pc + 1 : (intll *)*pc; break; }                     // branch if zero
+            case ENT: { *--sp = (intll)bp; bp = sp; sp = sp - *pc++; break; }     // enter subroutine
+            case ADJ: { sp = sp + *pc++; break; }               // stack adjust
+            case LEV: { sp = bp; bp = (intll *)*sp++; pc = (intll *)*sp++; break;} // leave subroutine
+            case LI:  { a = *(intll *)a;   break; }                                  // load int
+            case LC:  { a = *(char *)a;    break; }                               // load char
+            case SI:  { *(intll *)*sp++ = a;  break; }                               // store int
+            case SC:  { a = *(char *)*sp++ = a;    break; }                        // store char
+            case PSH: { *--sp = a; break; }                              // push
+            case OR:  { a = *sp++ |  a; break;}
+            case XOR: { a = *sp++ ^  a; break;}
+            case AND: { a = *sp++ &  a; break;}
+            case EQ:  { a = *sp++ == a; break;}
+            case NE:  { a = *sp++ != a; break;}
+            case LT:  { a = *sp++ <  a; break;}
+            case GT:  { a = *sp++ >  a; break;}
+            case LE:  { a = *sp++ <= a; break;}
+            case GE:  { a = *sp++ >= a; break;}
+            case SHL: { a = *sp++ << a; break;}
+            case SHR: { a = *sp++ >> a; break;}
+            case ADD: { a = *sp++ +  a; break;}
+            case SUB: { a = *sp++ -  a; break;}
+            case MUL: { a = *sp++ *  a; break;}
+            case DIV: { a = *sp++ /  a; break;}
+            case MOD: { a = *sp++ %  a; break;}
+            case OPEN:{ a = open((char *)sp[1], *sp); break; }
+            case READ:{ a = read(sp[2], (char *)sp[1], *sp); break; }
+            case CLOS:{ a = close(*sp);break; }
+            case PRTF:{ t = sp + pc[1]; a = printf((char *)t[-1], t[-2], t[-3], t[-4], t[-5], t[-6]); break;}
+            case MALC:{ a = (intll)malloc(*sp);break; }
+            case FREE:{ free((void *)*sp); break; }
+            case MSET:{ a = (intll)memset((char *)sp[2], sp[1], *sp);break; }
+            case MCMP:{ a = memcmp((char *)sp[2], (char *)sp[1], *sp); break; }
+            case EXIT:{ printf("exit(%lld) cycle = %lld\n", *sp, cycle); return *sp; }
+            default: { printf("unknown instruction = %lld! cycle = %lld\n", i, cycle); return -1; }
+        }
     }
-    parseNextToken();
-  }
-
-  if (!(pc = (intll *)idmain[Val])) { printf("main() not defined\n"); return -1; }
-  if (src) return 0;
-
-  // setup stack
-  bp = sp = (intll *)((intll)sp + poolsz);
-  *--sp = EXIT; // call exit if main returns
-  *--sp = PSH; t = sp;
-  *--sp = argc;
-  *--sp = (intll)argv;
-  *--sp = (intll)t;
-
-  // run...
-  cycle = 0;
-  while (1) {
-    i = *pc++; ++cycle;
-    if (debug) {
-      printf("%lld> %.4s", cycle,
-        &"LEA ,IMM ,JMP ,JSR ,BZ  ,BNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PSH ,"
-         "OR  ,XOR ,AND ,EQ  ,NE  ,LT  ,GT  ,LE  ,GE  ,SHL ,SHR ,ADD ,SUB ,MUL ,DIV ,MOD ,"
-         "OPEN,READ,CLOS,PRTF,MALC,FREE,MSET,MCMP,EXIT,"[i * 5]);
-      if (i <= ADJ) printf(" %lld\n", *pc); else printf("\n");
-    }
-    switch (i) {
-        case LEA: a = (intll)(bp + *pc++); break;                             // load local address
-        case IMM: a = *pc++; break;
-        case  JMP: pc = (intll *)*pc; break;                                   // jump
-        case  JSR: { *--sp = (intll)(pc + 1); pc = (intll *)*pc; break; }        // jump to subroutine
-        case  BZ:  pc = a ? pc + 1 : (intll *)*pc; break;                     // branch if zero
-        case  BNZ: pc = a ? (intll *)*pc : pc + 1;  break;                    // branch if not zero
-        case  ENT: { *--sp = (intll)bp; bp = sp; sp = sp - *pc++; break; }     // enter subroutine
-        case  ADJ: sp = sp + *pc++; break;               // stack adjust
-        case  LEV: { sp = bp; bp = (intll *)*sp++; pc = (intll *)*sp++; break;} // leave subroutine
-        case  LI:  a = *(intll *)a;   break;                                  // load int
-        case  LC:  a = *(char *)a;    break;                                // load char
-        case  SI:  *(intll *)*sp++ = a;  break;                               // store int
-        case  SC:  a = *(char *)*sp++ = a;    break;                        // store char
-        case  PSH: *--sp = a;           break;                              // push
-        case  OR:  a = *sp++ |  a;break;
-        case  XOR: a = *sp++ ^  a;break;
-        case  AND: a = *sp++ &  a;break;
-        case  EQ:  a = *sp++ == a;break;
-        case  NE:  a = *sp++ != a;break;
-        case  LT:  a = *sp++ <  a;break;
-        case  GT:  a = *sp++ >  a;break;
-        case  LE:  a = *sp++ <= a;break;
-        case  GE:  a = *sp++ >= a;break;
-        case  SHL: a = *sp++ << a;break;
-        case  SHR: a = *sp++ >> a;break;
-        case  ADD: a = *sp++ +  a;break;
-        case  SUB: a = *sp++ -  a;break;
-        case  MUL: a = *sp++ *  a;break;
-        case  DIV: a = *sp++ /  a;break;
-        case  MOD: a = *sp++ %  a;break;
-        case  OPEN: a = open((char *)sp[1], *sp);break;
-        case  READ: a = read(sp[2], (char *)sp[1], *sp);break;
-        case  CLOS: a = close(*sp);break;
-        case  PRTF: { t = sp + pc[1]; a = printf((char *)t[-1], t[-2], t[-3], t[-4], t[-5], t[-6]); break;}
-        case  MALC: a = (intll)malloc(*sp);break;
-        case  FREE: free((void *)*sp);break;
-        case  MSET: a = (int)memset((char *)sp[2], sp[1], *sp);break;
-        case  MCMP: a = memcmp((char *)sp[2], (char *)sp[1], *sp); break;
-        case  EXIT: { printf("exit(%lld) cycle = %lld\n", *sp, cycle); return *sp; }
-        default: { printf("unknown instruction = %lld! cycle = %lld\n", i, cycle); return -1; }
-    }
-  }
 }
