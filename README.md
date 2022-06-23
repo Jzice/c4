@@ -12,6 +12,7 @@ Try the following:
     ./c4 c4.c hello.c
     ./c4 c4.c c4.c hello.c
 
+## 内存
 
 ## 汇编指令
 
